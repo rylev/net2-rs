@@ -43,7 +43,9 @@
 )]
 #![deny(missing_docs, warnings)]
 
-#[cfg(any(target_os = "redox", unix))]
+#![feature(wasi_ext)]
+
+#[cfg(any(target_os = "redox", target_env = "wasi", unix))]
 extern crate libc;
 
 #[cfg(windows)]
@@ -70,10 +72,13 @@ mod sys;
 #[cfg(unix)]
 #[path = "sys/unix/mod.rs"]
 mod sys;
+#[cfg(target_env = "wasi")]
+#[path = "sys/wasi/mod.rs"]
+mod sys;
 #[cfg(windows)]
 #[path = "sys/windows/mod.rs"]
 mod sys;
-#[cfg(all(unix, not(any(target_os = "solaris"))))]
+#[cfg(all(any(unix, target_env = "wasi"), not(any(target_os = "solaris"))))]
 pub mod unix;
 
 pub use ext::{TcpListenerExt, TcpStreamExt, UdpSocketExt};

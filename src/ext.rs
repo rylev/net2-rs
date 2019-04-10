@@ -38,14 +38,16 @@ cfg_if! {
 
 use std::time::Duration;
 
-#[cfg(any(unix, target_os = "redox"))]
+#[cfg(any(unix, target_os = "redox", target_env = "wasi"))]
 use libc::*;
 #[cfg(any(unix, target_os = "redox"))]
 use std::os::unix::prelude::*;
+#[cfg(target_env = "wasi")]
+use std::os::wasi::prelude::*;
 #[cfg(target_os = "redox")]
 pub type Socket = usize;
-#[cfg(unix)]
-pub type Socket = c_int;
+#[cfg(any(unix, target_env = "wasi"))]
+pub type Socket = std::os::wasi::io::RawFd;
 #[cfg(windows)]
 pub type Socket = SOCKET;
 #[cfg(windows)]
@@ -71,16 +73,93 @@ fn v(opt: c_int) -> c_int {
 fn v(opt: c_int) -> c_int {
     opt
 }
+#[cfg(target_env = "wasi")]
+fn v(opt: c_int) -> c_int {
+    opt
+}
 #[cfg(windows)]
 fn v(opt: IPPROTO) -> c_int {
     opt as c_int
 }
+
+#[cfg(target_env = "wasi")]
+pub mod wasi_libc_extension {
+    use libc::*;
+    pub type socklen_t = u32;
+    pub const SOL_SOCKET: c_int = 0x00;
+    pub const SO_RCVBUF: c_int = 0x00;
+    pub const SO_SNDBUF: c_int = 0x00;
+    pub const TCP_NODELAY: c_int = 0x00;
+    pub const IPPROTO_TCP: c_int = 0x00;
+    pub const SO_RCVTIMEO: c_int = 0x00;
+    pub const SO_SNDTIMEO: c_int = 0x00;
+    pub const IPPROTO_IP: c_int = 0x00;
+    pub const IP_TTL: c_int = 0x00;
+    pub const IPPROTO_IPV6: c_int = 0x00;
+    pub const IPV6_V6ONLY: c_int = 0x00;
+    pub const SO_ERROR: c_int = 0x00;
+    pub const SO_LINGER: c_int = 0x00;
+    pub const SO_BROADCAST: c_int = 0x00;
+    pub const IP_MULTICAST_LOOP: c_int = 0x00;
+    pub const IP_MULTICAST_TTL: c_int = 0x00;
+    pub const IPV6_MULTICAST_HOPS: c_int = 0x00;
+    pub const IPV6_MULTICAST_LOOP: c_int = 0x00;
+    pub const IP_MULTICAST_IF: c_int = 0x00;
+    pub const IPV6_MULTICAST_IF: c_int = 0x00;
+    pub const IPV6_UNICAST_HOPS: c_int = 0x00;
+    pub const IP_ADD_MEMBERSHIP: c_int = 0x00;
+    pub const IPV6_ADD_MEMBERSHIP: c_int = 0x00;
+    pub const IP_DROP_MEMBERSHIP: c_int = 0x00;
+    pub const IPV6_DROP_MEMBERSHIP: c_int = 0x00;
+    pub const SO_REUSEADDR: c_int = 0x00;
+    pub const SOCK_STREAM: c_int = 0x00;
+    pub const AF_INET: c_int = 0x00;
+    pub const AF_INET6: c_int = 0x00;
+    pub const SO_KEEPALIVE: c_int = 0x00;
+    pub const KEEPALIVE_OPTION: c_int = 0x00;
+
+    pub type suseconds_t = c_long;
+
+    #[repr(align(4))]
+    pub struct in6_addr {
+        pub s6_addr: [u8; 16],
+    }
+
+    pub struct ipv6_mreq {
+        pub ipv6mr_multiaddr: in6_addr,
+        pub ipv6mr_interface: c_uint,
+    }
+
+    pub type in_addr_t = u32;
+    pub struct in_addr {
+        pub s_addr: in_addr_t,
+    }
+
+    pub struct linger {
+        pub l_onoff: c_int,
+        pub l_linger: c_int,
+    }
+
+    pub struct timeval {
+        pub tv_sec: time_t,
+        pub tv_usec: suseconds_t,
+    }
+
+    pub struct ip_mreq {
+        pub imr_multiaddr: in_addr,
+        pub imr_interface: in_addr,
+    }
+}
+
+#[cfg(target_env = "wasi")]
+use self::wasi_libc_extension::*;
 
 pub fn set_opt<T: Copy>(sock: Socket, opt: c_int, val: c_int, payload: T) -> io::Result<()> {
     unsafe {
         let payload = &payload as *const T as *const c_void;
         #[cfg(target_os = "redox")]
         let sock = sock as c_int;
+        #[cfg(not(target_env = "wasi"))]
         try!(::cvt(setsockopt(
             sock,
             opt,
@@ -98,6 +177,7 @@ pub fn get_opt<T: Copy>(sock: Socket, opt: c_int, val: c_int) -> io::Result<T> {
         let mut len = mem::size_of::<T>() as socklen_t;
         #[cfg(target_os = "redox")]
         let sock = sock as c_int;
+        #[cfg(not(target_env = "wasi"))]
         try!(::cvt(getsockopt(
             sock,
             opt,
@@ -673,6 +753,12 @@ impl<T: AsRawFd> AsSock for T {
         self.as_raw_fd()
     }
 }
+#[cfg(target_env = "wasi")]
+impl<T: AsRawFd> AsSock for T {
+    fn as_sock(&self) -> Socket {
+        self.as_raw_fd()
+    }
+}
 #[cfg(windows)]
 impl<T: AsRawSocket> AsSock for T {
     fn as_sock(&self) -> Socket {
@@ -785,6 +871,39 @@ impl TcpStreamExt for TcpStream {
     }
 
     #[cfg(unix)]
+    fn keepalive_ms(&self) -> io::Result<Option<u32>> {
+        let keepalive = try!(get_opt::<c_int>(self.as_sock(), SOL_SOCKET, SO_KEEPALIVE));
+        if keepalive == 0 {
+            return Ok(None);
+        }
+        let secs = try!(get_opt::<c_int>(
+            self.as_sock(),
+            v(IPPROTO_TCP),
+            KEEPALIVE_OPTION
+        ));
+        Ok(Some((secs as u32) * 1000))
+    }
+
+    #[cfg(target_env = "wasi")]
+    fn set_keepalive_ms(&self, keepalive: Option<u32>) -> io::Result<()> {
+        try!(set_opt(
+            self.as_sock(),
+            SOL_SOCKET,
+            SO_KEEPALIVE,
+            keepalive.is_some() as c_int
+        ));
+        if let Some(dur) = keepalive {
+            try!(set_opt(
+                self.as_sock(),
+                v(IPPROTO_TCP),
+                KEEPALIVE_OPTION,
+                (dur / 1000) as c_int
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_env = "wasi")]
     fn keepalive_ms(&self) -> io::Result<Option<u32>> {
         let keepalive = try!(get_opt::<c_int>(self.as_sock(), SOL_SOCKET, SO_KEEPALIVE));
         if keepalive == 0 {
@@ -925,7 +1044,7 @@ impl TcpStreamExt for TcpStream {
     }
 }
 
-#[cfg(any(target_os = "redox", unix))]
+#[cfg(any(target_os = "redox", unix, target_env = "wasi"))]
 fn ms2timeout(dur: Option<u32>) -> timeval {
     // TODO: be more rigorous
     match dur {
@@ -940,7 +1059,7 @@ fn ms2timeout(dur: Option<u32>) -> timeval {
     }
 }
 
-#[cfg(any(target_os = "redox", unix))]
+#[cfg(any(target_os = "redox", unix, target_env = "wasi"))]
 fn timeout2ms(dur: timeval) -> Option<u32> {
     if dur.tv_sec == 0 && dur.tv_usec == 0 {
         None
@@ -985,7 +1104,7 @@ fn dur2linger(dur: Option<Duration>) -> linger {
     }
 }
 
-#[cfg(any(target_os = "redox", unix))]
+#[cfg(any(target_os = "redox", unix, target_env = "wasi"))]
 fn dur2linger(dur: Option<Duration>) -> linger {
     match dur {
         Some(d) => linger {
@@ -1282,6 +1401,20 @@ impl UdpSocketExt for UdpSocket {
         }
     }
 
+    #[cfg(target_env = "wasi")]
+    fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        unsafe {
+            ::cvt(libc::__wasi_sock_send(
+                self.as_sock() as libc::__wasi_fd_t,
+                buf.as_ptr() as *const _,
+                buf.len(),
+                0,
+                0
+            ))
+            .map(|n| n as usize)
+        }
+    }
+
     #[cfg(windows)]
     fn send(&self, buf: &[u8]) -> io::Result<usize> {
         let len = ::std::cmp::min(buf.len(), c_int::max_value() as usize);
@@ -1317,6 +1450,21 @@ impl UdpSocketExt for UdpSocket {
                 buf.as_mut_ptr() as *mut _,
                 buf.len(),
                 0,
+            ))
+            .map(|n| n as usize)
+        }
+    }
+
+    #[cfg(target_env = "wasi")]
+    fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        unsafe {
+            ::cvt(__wasi_sock_recv(
+                self.as_sock(),
+                buf.as_mut_ptr() as *mut _,
+                buf.len(),
+                0,
+                0,
+                0
             ))
             .map(|n| n as usize)
         }
@@ -1362,6 +1510,10 @@ fn set_nonblocking(sock: Socket, nonblocking: bool) -> io::Result<()> {
     }
     ::cvt(unsafe { fcntl(sock as c_int, F_SETFL, flags) }).and(Ok(()))
 }
+#[cfg(target_env = "wasi")]
+fn set_nonblocking(sock: Socket, nonblocking: bool) -> io::Result<()> {
+    Ok(())
+}
 
 #[cfg(unix)]
 fn set_nonblocking(sock: Socket, nonblocking: bool) -> io::Result<()> {
@@ -1388,7 +1540,7 @@ fn ip2in_addr(ip: &Ipv4Addr) -> in_addr {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_env = "wasi"))]
 fn ip2in_addr(ip: &Ipv4Addr) -> in_addr {
     let oct = ip.octets();
     in_addr {

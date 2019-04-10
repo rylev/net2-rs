@@ -12,6 +12,8 @@
 use libc::c_int;
 #[cfg(unix)]
 use libc::c_int;
+#[cfg(target_env = "wasi")]
+use libc::c_int;
 use std::fmt;
 use std::io;
 use std::mem;
